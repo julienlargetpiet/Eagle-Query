@@ -133,12 +133,19 @@ def extract_text(content, content_type):
 
     return content  
 
-
 def tokenize(text):
-    return [word 
-            for word in re.findall(r"[^\W_]+", text.casefold()) 
-            if len(word) <= 64
-    ]
+    for match in re.finditer(r"[^\W_]+", text.casefold()):
+        word = match.group()
+
+        if len(word) <= 64:
+            yield word
+
+
+#def tokenize(text):
+#    return [word 
+#            for word in re.findall(r"[^\W_]+", text.casefold()) 
+#            if len(word) <= 64
+#    ]
 
 
 def discover_sources(source):
@@ -230,6 +237,8 @@ def index_source(index, path):
 
             count = 0
 
+            term_cache = {}
+
             for page_id, url, content, content_type in source_db.execute(
                 "SELECT id, url, content, content_type FROM pages"
             ):
@@ -246,21 +255,36 @@ def index_source(index, path):
                     """,
                     (source_id, page_id, url, document_length),
                 ).lastrowid
-
-
+   
+                postings = []
 
                 for term, frequency in frequencies.items():
 
-                    index.execute("INSERT OR IGNORE INTO terms(term) VALUES (?)", (term,))
+                    term_id = term_cache.get(term)
 
-                    term_id = index.execute(
-                        "SELECT id FROM terms WHERE term = ?", (term,)
-                    ).fetchone()[0]
+                    if term_id is None:
 
-                    index.execute(
-                        "INSERT INTO postings(term_id, document_id, frequency) VALUES (?, ?, ?)",
-                        (term_id, document_id, frequency),
-                    )
+                        index.execute(
+                            "INSERT OR IGNORE INTO terms(term) VALUES (?)",
+                            (term,)
+                        )
+
+                        term_id = index.execute(
+                            "SELECT id FROM terms WHERE term = ?",
+                            (term,)
+                        ).fetchone()[0]
+
+                        term_cache[term] = term_id
+
+                    postings.append((term_id, document_id, frequency))
+
+                index.executemany(
+                    """
+                    INSERT INTO postings(term_id, document_id, frequency)
+                    VALUES (?, ?, ?)
+                    """,
+                    postings
+                )
 
                 count += 1
 
