@@ -200,7 +200,7 @@ def opened_source(path):
             conn.close()
 
 
-def index_source(index, path):
+def index_source(index, path, term_cache):
 
     stat = path.stat()
     key = str(path)
@@ -236,8 +236,6 @@ def index_source(index, path):
                 ).lastrowid
 
             count = 0
-
-            term_cache = {}
 
             for page_id, url, content, content_type in source_db.execute(
                 "SELECT id, url, content, content_type FROM pages"
@@ -317,11 +315,13 @@ def index_command(args):
 
             index.executescript(SCHEMA)
 
+            term_cache = {}
+
             for path in sources:
                 if path == target:
                     raise ValueError("Source database must not be the search index")
 
-                index_source(index, path)
+                index_source(index, path, term_cache)
 
         if args.rebuild:
 
