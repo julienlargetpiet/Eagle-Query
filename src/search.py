@@ -351,33 +351,49 @@ def search_command(args):
 
     placeholders = ", ".join("?" for _ in words)
 
-    # AND search; score is simply the sum of word frequencies, not BM25.
+    if args.and_behavior:
 
+        sql = f"""
+            SELECT
+                d.id,
+                d.url,
+                s.path,
+                d.page_id,
+                d.length,
+                t.id,
+                p.frequency
+            FROM terms AS t
+            JOIN postings AS p ON p.term_id = t.id
+            JOIN documents AS d ON d.id = p.document_id
+            JOIN sources AS s ON s.id = d.source_id
+            WHERE t.term IN ({placeholders})
+            AND d.id IN (
+                SELECT p2.document_id
+                FROM postings AS p2
+                JOIN terms AS t2 ON t2.id = p2.term_id
+                WHERE t2.term IN ({placeholders})
+                GROUP BY p2.document_id
+                HAVING COUNT(*) = ?
+            )
+        """
 
-    sql = f"""
-        SELECT
-            d.id,
-            d.url,
-            s.path,
-            d.page_id,
-            d.length,
-            t.id,
-            p.frequency
-        FROM terms AS t
-        JOIN postings AS p ON p.term_id = t.id
-        JOIN documents AS d ON d.id = p.document_id
-        JOIN sources AS s ON s.id = d.source_id
-        WHERE t.term IN ({placeholders})
-        AND d.id IN (
-            SELECT p2.document_id
-            FROM postings AS p2
-            JOIN terms AS t2 ON t2.id = p2.term_id
-            WHERE t2.term IN ({placeholders})
-            GROUP BY p2.document_id
-            HAVING COUNT(*) = ?
-        )
-    """
+    else:
 
+        sql = f"""
+            SELECT
+                d.id,
+                d.url,
+                s.path,
+                d.page_id,
+                d.length,
+                t.id,
+                p.frequency
+            FROM terms AS t
+            JOIN postings AS p ON p.term_id = t.id
+            JOIN documents AS d ON d.id = p.document_id
+            JOIN sources AS s ON s.id = d.source_id
+            WHERE t.term IN ({placeholders})
+        """
 
     with sqlite3.connect(target.as_uri() + "?mode=ro", 
                          uri=True) as index:
@@ -404,10 +420,20 @@ def search_command(args):
         
         document_frequencies = dict(df_rows)
 
-        rows = index.execute(
-            sql,
-            (*words, *words, len(words))
-        ).fetchall()
+        if args.and_behavior:
+
+            rows = index.execute(
+                sql,
+                (*words, *words, len(words))
+            ).fetchall()
+
+        else:
+
+            rows = index.execute(
+                sql,
+                words
+            ).fetchall()
+
 
         documents = {}
         
@@ -590,6 +616,13 @@ def main():
         "--output",
         default="contacts.csv",
         help="Destination CSV file"
+    )
+
+    query.add_argument(
+        "--and-behavior",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use AND matching (default) or OR matching"
     )
 
     query.set_defaults(run=search_command)
