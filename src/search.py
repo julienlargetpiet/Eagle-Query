@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
-from collections import Counter
+from collections import defaultdict
 from contextlib import contextmanager, closing
 import gzip
 from html.parser import HTMLParser
@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import tempfile
 import math
+import json
 
 import csv
 from html import unescape
@@ -99,6 +100,7 @@ CREATE TABLE IF NOT EXISTS postings (
     term_id INTEGER NOT NULL REFERENCES terms(id),
     document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     frequency INTEGER NOT NULL,
+    positions TEXT NOT NULL,
     PRIMARY KEY(term_id, document_id)
 );
 
@@ -242,10 +244,14 @@ def index_source(index, path, term_cache):
             ):
 
 
-                frequencies = Counter(tokenize(extract_text(content, content_type)))
-                
-                document_length = sum(frequencies.values())
-                
+                positions = defaultdict(list)
+                document_length = 0
+
+                for position, term in enumerate(tokenize(extract_text(content, content_type))):
+                    positions[term].append(position)
+                    document_length += 1
+    
+
                 document_id = index.execute(
                     """
                     INSERT INTO documents(source_id, page_id, url, length)
@@ -256,7 +262,7 @@ def index_source(index, path, term_cache):
    
                 postings = []
 
-                for term, frequency in frequencies.items():
+                for term, term_position in positions.items():
 
                     term_id = term_cache.get(term)
 
@@ -274,12 +280,16 @@ def index_source(index, path, term_cache):
 
                         term_cache[term] = term_id
 
-                    postings.append((term_id, document_id, frequency))
+                    postings.append((term_id, 
+                                     document_id, 
+                                     len(term_position), 
+                                     json.dumps(term_position))
+                                   )
 
                 index.executemany(
                     """
-                    INSERT INTO postings(term_id, document_id, frequency)
-                    VALUES (?, ?, ?)
+                    INSERT INTO postings(term_id, document_id, frequency, positions)
+                    VALUES (?, ?, ?, ?)
                     """,
                     postings
                 )
@@ -335,6 +345,17 @@ def index_command(args):
             working.unlink(missing_ok=True)
         raise
 
+def phrase_matches(phrase, positions):
+
+    first_positions = positions.get(phrase[0], set())
+
+    return any(
+        all(
+            start + offset in positions.get(term, set())
+            for offset, term in enumerate(phrase)
+        )
+        for start in first_positions
+    )
  
 def search_command(args):
 
@@ -343,57 +364,96 @@ def search_command(args):
     if not target.is_file():
         raise ValueError(f"Index not found: {target}. Run 'index' first.")
 
-    words = list(dict.fromkeys(tokenize(args.query)))
+    #words = list(dict.fromkeys(tokenize(args.query)))
 
-    if not words:
-        print("No searchable words in query.")
-        return
+    #if not words:
+    #    print("No searchable words in query.")
+    #    return
+
+    phrases = [
+        list(tokenize(phrase)) 
+        for phrase in re.findall('"([^"]+)"', args.query)
+    ]
+
+    phrases = [phrase for phrase in phrases if phrase]
+
+    remaining_query = re.sub('"([^"]+)"', ' ', args.query)
+    single_words = list(dict.fromkeys(tokenize(remaining_query)))
+
+    words = list(dict.fromkeys(
+        single_words +
+        [word for phrase in phrases for word in phrase]
+    ))
+    
+    has_phrases = bool(phrases)
 
     placeholders = ", ".join("?" for _ in words)
 
-    if args.and_behavior:
+    if has_phrases:
 
         sql = f"""
-            SELECT
-                d.id,
-                d.url,
-                s.path,
-                d.page_id,
-                d.length,
-                t.id,
-                p.frequency
-            FROM terms AS t
-            JOIN postings AS p ON p.term_id = t.id
-            JOIN documents AS d ON d.id = p.document_id
-            JOIN sources AS s ON s.id = d.source_id
-            WHERE t.term IN ({placeholders})
-            AND d.id IN (
-                SELECT p2.document_id
-                FROM postings AS p2
-                JOIN terms AS t2 ON t2.id = p2.term_id
-                WHERE t2.term IN ({placeholders})
-                GROUP BY p2.document_id
-                HAVING COUNT(*) = ?
-            )
-        """
+              SELECT
+                  d.id,
+                  d.url,
+                  s.path,
+                  d.page_id,
+                  d.length,
+                  t.id,
+                  p.frequency,
+                  t.term,
+                  p.positions
+              FROM terms AS t
+              JOIN postings AS p ON p.term_id = t.id
+              JOIN documents AS d ON d.id = p.document_id
+              JOIN sources AS s ON s.id = d.source_id
+              WHERE t.term IN ({placeholders})
+          """
 
     else:
 
-        sql = f"""
-            SELECT
-                d.id,
-                d.url,
-                s.path,
-                d.page_id,
-                d.length,
-                t.id,
-                p.frequency
-            FROM terms AS t
-            JOIN postings AS p ON p.term_id = t.id
-            JOIN documents AS d ON d.id = p.document_id
-            JOIN sources AS s ON s.id = d.source_id
-            WHERE t.term IN ({placeholders})
-        """
+        if args.and_behavior:
+
+            sql = f"""
+                SELECT
+                    d.id,
+                    d.url,
+                    s.path,
+                    d.page_id,
+                    d.length,
+                    t.id,
+                    p.frequency
+                FROM terms AS t
+                JOIN postings AS p ON p.term_id = t.id
+                JOIN documents AS d ON d.id = p.document_id
+                JOIN sources AS s ON s.id = d.source_id
+                WHERE t.term IN ({placeholders})
+                AND d.id IN (
+                    SELECT p2.document_id
+                    FROM postings AS p2
+                    JOIN terms AS t2 ON t2.id = p2.term_id
+                    WHERE t2.term IN ({placeholders})
+                    GROUP BY p2.document_id
+                    HAVING COUNT(*) = ?
+                )
+            """
+
+        else:
+
+            sql = f"""
+                SELECT
+                    d.id,
+                    d.url,
+                    s.path,
+                    d.page_id,
+                    d.length,
+                    t.id,
+                    p.frequency
+                FROM terms AS t
+                JOIN postings AS p ON p.term_id = t.id
+                JOIN documents AS d ON d.id = p.document_id
+                JOIN sources AS s ON s.id = d.source_id
+                WHERE t.term IN ({placeholders})
+            """
 
     with sqlite3.connect(target.as_uri() + "?mode=ro", 
                          uri=True) as index:
@@ -420,24 +480,29 @@ def search_command(args):
         
         document_frequencies = dict(df_rows)
 
-        if args.and_behavior:
-
-            rows = index.execute(
-                sql,
-                (*words, *words, len(words))
-            ).fetchall()
-
+        if has_phrases:
+            parameters = words
+        elif args.and_behavior:
+            parameters = (*words, *words, len(words))
         else:
-
-            rows = index.execute(
-                sql,
-                words
-            ).fetchall()
-
+            parameters = words
+        
+        rows = index.execute(sql, parameters).fetchall()
 
         documents = {}
         
-        for document_id, url, source_path, page_id, length, term_id, frequency in rows:
+        for row in rows:
+        
+            if has_phrases:
+                (
+                    document_id, url, source_path, page_id,
+                    length, term_id, frequency, term, raw_positions
+                ) = row
+            else:
+                (
+                    document_id, url, source_path, page_id,
+                    length, term_id, frequency
+                ) = row
         
             if document_id not in documents:
                 documents[document_id] = {
@@ -447,6 +512,9 @@ def search_command(args):
                     "score": 0.0
                 }
         
+                if has_phrases:
+                    documents[document_id]["positions"] = {}
+        
             documents[document_id]["score"] += bm25(
                 tf=frequency,
                 df=document_frequencies[term_id],
@@ -454,6 +522,39 @@ def search_command(args):
                 avgdl=avgdl,
                 N=N
             )
+        
+            if has_phrases:
+                documents[document_id]["positions"][term] = set(
+                    json.loads(raw_positions)
+                )
+
+
+    if has_phrases:
+    
+        filtered_documents = {}
+    
+        for document_id, doc in documents.items():
+    
+            positions = doc["positions"]
+    
+            matches = [
+                phrase_matches(phrase, positions)
+                for phrase in phrases
+            ]
+    
+            matches.extend(
+                term in positions
+                for term in single_words
+            )
+    
+            if (
+                (args.and_behavior and all(matches))
+                or (not args.and_behavior and any(matches))
+            ):
+                filtered_documents[document_id] = doc
+                #print(f"ok: {doc}")
+    
+        documents = filtered_documents
 
     # we sort here to avoid havin unnecessary iterations 
     # for the pages database loop (SQL queries, decompression...)
@@ -463,7 +564,6 @@ def search_command(args):
         key=lambda doc: doc["score"],
         reverse=True
     )[:args.limit]
-
 
     # we group to avoid decompressing the same source more than one time
     grouped = {}
