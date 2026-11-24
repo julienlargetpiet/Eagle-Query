@@ -56,6 +56,16 @@ python3 src/main.py search \
 | `--index` | No | `database/search_index.db` | Index database path |
 | `--rebuild` | No | `False` | Rebuild the entire index |
 
+When `--rebuild` isn't activated:
+
+1. New archive (`.db` or `.db.gz`): Its pages are added to the existing index.
+
+2. Unchanged archive: It is skipped by comparing `size_bytes` and `mtime_ns`.
+
+3. Modified archive: The previously indexed documents from this archive are deleted, and all its pages are reindexed.
+
+4. Archive removed from the source directory: Its documents remain in the index because the program does not automatically remove missing sources.
+
 ### `search`
 
 | Argument | Required | Default | Description |
